@@ -1,0 +1,159 @@
+# ===========================================
+# Dota2 高光片段自动剪辑助手 - .gitignore
+# ===========================================
+
+# --------------------
+# Python
+# --------------------
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Translations
+*.mo
+*.pot
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Environments
+.env
+.venv/
+env/
+venv/
+ENV/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# Pytype static type analyzer
+.pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# --------------------
+# IDE
+# --------------------
+# PyCharm
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# VSCode
+.vscode/
+*.code-workspace
+
+# --------------------
+# OS
+# --------------------
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# macOS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# Linux
+*~
+
+# --------------------
+# Project Specific
+# --------------------
+# Log files
+*.log
+logs/
+
+# Output files
+output/
+videos/output/
+*.mp4
+*.avi
+*.mkv
+!videos/.gitkeep
+!videos/output/.gitkeep
+
+# Cache files
+cache/
+*.cache
+
+# Configuration files with sensitive data
+config.local.yaml
+config.local.yml
+config.private.yaml
+config.private.yml
+secrets.yaml
+secrets.yml
+.local_config
+
+# Model files (too large for git)
+model/*.pt
+model/*.pth
+model/*.onnx
+!model/.gitkeep
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Build artifacts
+build/
+dist/
