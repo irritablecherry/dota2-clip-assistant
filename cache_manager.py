@@ -19,7 +19,6 @@ class CachedSegment:
     start_time: float
     end_time: float
     clip_type: str
-    confidence: float
     description: str
 
 
@@ -125,7 +124,6 @@ class VideoCacheManager:
                     start_time=float(seg.start_time),
                     end_time=float(seg.end_time),
                     clip_type=str(seg.clip_type),
-                    confidence=float(seg.confidence),
                     description=str(seg.description)
                 ))
             

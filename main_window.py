@@ -287,9 +287,9 @@ class SegmentsTable(QGroupBox):
         layout = QVBoxLayout()
 
         self.table = QTableWidget()
-        self.table.setColumnCount(6)
+        self.table.setColumnCount(5)
         self.table.setHorizontalHeaderLabels([
-            "序号", "类型", "描述", "开始时间", "结束时间", "置信度"
+            "序号", "类型", "描述", "开始时间", "结束时间"
         ])
 
         header = self.table.horizontalHeader()
@@ -298,13 +298,33 @@ class SegmentsTable(QGroupBox):
         self.table.setColumnWidth(1, 100)
         self.table.setColumnWidth(3, 100)
         self.table.setColumnWidth(4, 100)
-        self.table.setColumnWidth(5, 80)
 
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
 
+        # 设置表头样式
+        header.setDefaultAlignment(Qt.AlignCenter)
+        header.setFixedHeight(35)
+        
         layout.addWidget(self.table)
         self.setLayout(layout)
+        
+        # 在表头下方添加边框线（使用 QFrame 覆盖在表头底部）
+        self.border_frame = QFrame(self.table)
+        self.border_frame.setFixedHeight(1)
+        self.border_frame.setStyleSheet("background-color: #999;")
+        self.border_frame.setGeometry(0, 34, self.table.width(), 1)
+        self.border_frame.raise_()
+        
+        # 监听表格大小变化，调整边框宽度
+        self.table.resizeEvent = self._on_table_resize
+
+    def _on_table_resize(self, event):
+        """表格大小变化时调整边框宽度"""
+        if hasattr(self, 'border_frame'):
+            self.border_frame.setGeometry(0, 34, self.table.width(), 1)
+        # 调用原始 resizeEvent
+        QTableWidget.resizeEvent(self.table, event)
 
     def update_segments(self, segments: list):
         self.table.setRowCount(0)
@@ -319,24 +339,8 @@ class SegmentsTable(QGroupBox):
                 self.table.setItem(row, 2, QTableWidgetItem(getattr(seg, 'description', '无描述')))
                 self.table.setItem(row, 3, QTableWidgetItem(f"{getattr(seg, 'start_time', 0):.2f}s"))
                 self.table.setItem(row, 4, QTableWidgetItem(f"{getattr(seg, 'end_time', 0):.2f}s"))
-                self.table.setItem(row, 5, QTableWidgetItem(f"{getattr(seg, 'confidence', 0):.2f}"))
             except Exception as e:
                 print(f"[ERROR] 添加片段到表格失败：{e}")
-                continue
-
-        for row in range(self.table.rowCount()):
-            try:
-                conf_item = self.table.item(row, 5)
-                if conf_item:
-                    conf = float(conf_item.text())
-                    if conf >= 0.8:
-                        conf_item.setBackground(Qt.green)
-                    elif conf >= 0.6:
-                        conf_item.setBackground(Qt.yellow)
-                    else:
-                        conf_item.setBackground(Qt.gray)
-            except (ValueError, AttributeError) as e:
-                print(f"[ERROR] 设置置信度背景色失败：{e}")
                 continue
 
 
@@ -724,7 +728,6 @@ class Dota2ClipAssistant(QMainWindow):
                 start_time=seg_data.start_time,
                 end_time=seg_data.end_time,
                 clip_type=seg_data.clip_type,
-                confidence=seg_data.confidence,
                 description=seg_data.description
             ))
 
