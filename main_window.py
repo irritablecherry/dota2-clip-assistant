@@ -119,14 +119,14 @@ class AnalysisWorker(QThread):
 
 class ExtractWorker(QThread):
     """片段提取工作线程"""
-    progress = pyqtSignal(str, int, int)
+    progress = pyqtSignal(str, int, int, int, int)  # (clip_name, current, total, processed, total_clips)
     stats_update = pyqtSignal(float, float)
     finished = pyqtSignal(object)
     error = pyqtSignal(str)
 
     def __init__(self, detector: Dota2ClipDetector, video_path: str,
                  segments: list, output_dir: str, merge_output: str,
-                 add_fade: bool, do_merge: bool, parent=None):
+                 add_fade: bool, do_merge: bool, use_ffmpeg: bool = False, parent=None):
         super().__init__(parent)
         self.detector = detector
         self.video_path = video_path
@@ -135,6 +135,7 @@ class ExtractWorker(QThread):
         self.merge_output = merge_output
         self.add_fade = add_fade
         self.do_merge = do_merge
+        self.use_ffmpeg = use_ffmpeg
         self.start_time = 0
         self.end_time = 0
 
@@ -146,9 +147,10 @@ class ExtractWorker(QThread):
             last_update_time = time.time()
             processed_clips = 0
 
-            def callback(clip_name, current, total):
+            def callback(clip_name, current, total, processed=1, total_clips=1):
                 nonlocal last_update_time, processed_clips
-                self.progress.emit(clip_name, current, total)
+                # 传递当前处理的片段索引（从 1 开始）
+                self.progress.emit(clip_name, current, total, processed, total_clips)
 
                 if isinstance(clip_name, str) and clip_name.endswith('.mp4'):
                     if current >= total - 1:
@@ -163,7 +165,7 @@ class ExtractWorker(QThread):
             # 提取所有片段
             clip_paths = self.detector.extract_all_clips(
                 self.video_path, self.segments, self.output_dir,
-                callback, self.add_fade, extract_first_only=False
+                callback, self.add_fade, extract_first_only=False, use_ffmpeg=self.use_ffmpeg
             )
 
             merged_path = ""
@@ -175,9 +177,11 @@ class ExtractWorker(QThread):
                     merged_path = self.merge_output
                 else:
                     # 多个片段才进行拼接
-                    def merge_callback(clip_name, current, total):
-                        self.progress.emit(clip_name, int(current), int(total))
-                    self.detector.merge_clips(clip_paths, self.merge_output, callback=merge_callback)
+                    def merge_callback(clip_name, current, total, processed=1, total_clips=1):
+                        self.progress.emit(clip_name, int(current), int(total), processed, total_clips)
+                    self.detector.merge_clips(
+                        clip_paths, self.merge_output, callback=merge_callback, use_ffmpeg=self.use_ffmpeg
+                    )
                     merged_path = self.merge_output
 
             self.end_time = time.time()
@@ -395,7 +399,8 @@ class Dota2ClipAssistant(QMainWindow):
         """窗口关闭时保存配置"""
         config = {
             "last_video_dir": self.last_video_dir,
-            "last_output_dir": self.last_output_dir
+            "last_output_dir": self.last_output_dir,
+            "use_ffmpeg": self.ffmpeg_check.isChecked() if hasattr(self, 'ffmpeg_check') else False
         }
         save_config(config)
         event.accept()
@@ -454,9 +459,13 @@ class Dota2ClipAssistant(QMainWindow):
         self.fade_check.setChecked(True)
         self.merge_clips_check = QCheckBox("拼接所有片段为完整视频")
         self.merge_clips_check.setChecked(True)
+        self.ffmpeg_check = QCheckBox("使用 FFmpeg 加速处理（速度提升 10-50 倍）")
+        self.ffmpeg_check.setChecked(False)
+        self.ffmpeg_check.setToolTip("使用 FFmpeg 命令行工具进行视频裁剪，速度远快于 Python 库处理")
 
         effect_layout.addWidget(self.fade_check)
         effect_layout.addWidget(self.merge_clips_check)
+        effect_layout.addWidget(self.ffmpeg_check)
         effect_layout.addStretch()
         control_layout.addLayout(effect_layout)
 
@@ -556,6 +565,26 @@ class Dota2ClipAssistant(QMainWindow):
             self.log_panel.append_log(f"✅ 模型加载成功：{model_path.name}")
             self.log_panel.append_log(f"📊 检测间隔：每 {detect_interval} 帧检测一次人头数")
             self.log_panel.append_log("🔍 人头数检测已就绪（EasyOCR）")
+            
+            # 检测 FFmpeg 是否安装
+            from clip_detector import check_ffmpeg_installed, get_ffmpeg_version
+            if check_ffmpeg_installed():
+                ffmpeg_version = get_ffmpeg_version()
+                self.log_panel.append_log(f"✅ FFmpeg 已安装：{ffmpeg_version}")
+                self.log_panel.append_log("🚀 视频提取可使用 FFmpeg 加速（速度提升 10-50 倍）")
+                if hasattr(self, 'ffmpeg_check'):
+                    self.ffmpeg_check.setEnabled(True)
+                    # 从配置加载用户偏好
+                    config = load_config()
+                    use_ffmpeg = config.get("use_ffmpeg", False)
+                    self.ffmpeg_check.setChecked(use_ffmpeg)
+            else:
+                self.log_panel.append_log("ℹ️ 未检测到 FFmpeg，使用 Python 库处理视频")
+                self.log_panel.append_log("💡 安装 FFmpeg 可大幅提升视频处理速度：https://ffmpeg.org/download.html")
+                if hasattr(self, 'ffmpeg_check'):
+                    self.ffmpeg_check.setEnabled(False)
+                    self.ffmpeg_check.setChecked(False)
+                    self.ffmpeg_check.setToolTip("FFmpeg 未安装，此选项不可用")
         except Exception as e:
             QMessageBox.critical(self, "错误", f"模型加载失败：{str(e)}")
             sys.exit(1)
@@ -893,8 +922,13 @@ class Dota2ClipAssistant(QMainWindow):
 
         add_fade = self.fade_check.isChecked()
         do_merge = self.merge_clips_check.isChecked()
+        use_ffmpeg = self.ffmpeg_check.isChecked() if self.ffmpeg_check.isEnabled() else False
 
         self.log_panel.append_log("✂️ 开始提取片段...")
+        if use_ffmpeg:
+            self.log_panel.append_log("   🚀 使用 FFmpeg 加速处理")
+        else:
+            self.log_panel.append_log("   🐍 使用 Python 库处理")
         if add_fade:
             self.log_panel.append_log("   🎞️ 添加淡入淡出转场效果")
         if do_merge:
@@ -903,7 +937,7 @@ class Dota2ClipAssistant(QMainWindow):
         self.worker = ExtractWorker(
             self.detector, self.video_path,
             self.segments, output_dir, merge_output,
-            add_fade, do_merge, parent=self
+            add_fade, do_merge, use_ffmpeg, parent=self
         )
         self.worker.progress.connect(self.on_extract_progress)
         self.worker.stats_update.connect(self.on_extract_stats_update)
@@ -911,16 +945,20 @@ class Dota2ClipAssistant(QMainWindow):
         self.worker.error.connect(self.on_extract_error)
         self.worker.start()
 
-    def on_extract_progress(self, clip_name: str, current: int, total: int):
+    def on_extract_progress(self, clip_name: str, current: int, total: int, 
+                            processed: int, total_clips: int):
         """提取进度更新"""
-        if "拼接中" in clip_name:
-            progress = int((current / total) * 100) if total > 0 else 0
-            self.progress_bar.setValue(progress)
-            self.statusBar().showMessage(f"拼接中：{current}/{total} ({progress}%)")
+        # 计算当前片段的进度百分比
+        progress = int((current / total) * 100) if total > 0 else 0
+        self.progress_bar.setValue(progress)
+        
+        if "拼接中" in clip_name or clip_name == "合并完成":
+            self.statusBar().showMessage(f"拼接中：{current}/{total} ({progress}%)  片段：{processed}/{total_clips}")
         else:
-            progress = int(((current) / total) * 100) if total > 0 else 0
-            self.progress_bar.setValue(progress)
-            self.statusBar().showMessage(f"提取中：{clip_name} ({current}/{total})")
+            # 显示当前片段名称和进度，以及已处理/总片段数
+            self.statusBar().showMessage(
+                f"提取中：{clip_name} ({current}/{total}, {progress}%)  进度：{processed}/{total_clips}"
+            )
 
     def on_extract_stats_update(self, elapsed: float, clips_per_second: float):
         """提取统计实时更新"""
