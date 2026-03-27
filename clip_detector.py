@@ -25,7 +25,6 @@ class ClipSegment:
     start_time: float
     end_time: float
     clip_type: str
-    confidence: float
     description: str
     parent_event: str = ""  # 所属的原始事件类型
 
@@ -256,16 +255,27 @@ class Dota2ClipDetector:
         no_score_threshold = int(2.0 * self.fps)  # 连续 2 秒无比分才视为无效
         consecutive_no_score_count = 0
 
+        # 初始化上一次检测结果（用于间隔检测时的复用）
+        last_detections = []
+
         start_time = time.time()
-        print(f"[DEBUG] 开始分析视频，总帧数：{total_frames}, FPS: {self.fps}")
+        print(f"[DEBUG] 开始分析视频，总帧数：{total_frames}, FPS: {self.fps}, 检测间隔：{self.detect_interval}帧")
 
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
 
-            # YOLO 检测
-            detections = self.detect_frame(frame)
+            # YOLO 间隔检测
+            is_detect_frame = (frame_idx % self.detect_interval == 0)
+            
+            if is_detect_frame:
+                # 执行 YOLO 检测
+                detections = self.detect_frame(frame)
+                last_detections = detections
+            else:
+                # 使用上一次的检测结果
+                detections = last_detections
 
             # 每帧只保留每个类别置信度最高的检测结果（避免同一类别重复检测）
             if detections:
@@ -279,88 +289,99 @@ class Dota2ClipDetector:
             if detections:
                 frame_detections[frame_idx] = detections
 
-                # 检测 replay/paused 作为切断点，并跟踪状态
-                has_replay = False
-                has_paused = False
-                
-                for det in detections:
-                    if det['class'] == 'replay':
-                        has_replay = True
-                        if replay_status is None:
-                            replay_status = 'START'
-                            replay_start_frame = frame_idx
-                            log_msg = f"Replay 开始 帧 {frame_idx} ({frame_idx/self.fps:.2f}s) 置信度：{det['confidence']:.2f}"
-                            print(f"[DEBUG] {log_msg}")
-                            if self.log_callback:
-                                self.log_callback(f"🎬 {log_msg}")
+                # 检测 replay/paused 作为切断点，并跟踪状态（只在检测帧执行）
+                if is_detect_frame:
+                    has_replay = False
+                    has_paused = False
 
-                    if det['class'] == 'paused':
-                        has_paused = True
-                        if paused_status is None:
-                            paused_status = 'START'
-                            paused_start_frame = frame_idx
-                            log_msg = f"Paused 开始 帧 {frame_idx} ({frame_idx/self.fps:.2f}s) 置信度：{det['confidence']:.2f}"
-                            print(f"[DEBUG] {log_msg}")
-                            if self.log_callback:
-                                self.log_callback(f"⏸️ {log_msg}")
+                    for det in detections:
+                        if det['class'] == 'replay':
+                            has_replay = True
+                            if replay_status is None:
+                                replay_status = 'START'
+                                # 动态缓冲：向前缓冲 = 检测间隔对应的时间（可能漏掉的最大时间窗口）
+                                buffer_seconds = self.detect_interval / self.fps
+                                replay_start_frame = frame_idx - int(buffer_seconds * self.fps)
+                                replay_start_frame = max(0, replay_start_frame)  # 不能小于 0
+                                log_msg = f"Replay 开始 帧 {frame_idx} ({frame_idx/self.fps:.2f}s) 置信度：{det['confidence']:.2f}, 向前缓冲 {buffer_seconds:.1f}s 至帧 {replay_start_frame}"
+                                print(f"[DEBUG] {log_msg}")
+                                if self.log_callback:
+                                    self.log_callback(f"🎬 {log_msg}")
 
-                # 检测 replay 结束
-                if not has_replay and replay_status == 'START':
-                    replay_status = None
-                    replay_end_buffer_frame = frame_idx + int(1.0 * self.fps)  # 结束后 1 秒缓冲
-                    duration = (frame_idx - replay_start_frame) / self.fps
-                    log_msg = f"Replay 结束 帧 {frame_idx} ({frame_idx/self.fps:.2f}s) 持续：{duration:.2f}s, 缓冲至帧 {replay_end_buffer_frame}"
-                    print(f"[DEBUG] {log_msg}")
-                    if self.log_callback:
-                        self.log_callback(f"🎬 {log_msg}")
+                        if det['class'] == 'paused':
+                            has_paused = True
+                            if paused_status is None:
+                                paused_status = 'START'
+                                # 动态缓冲：向前缓冲 = 检测间隔对应的时间（可能漏掉的最大时间窗口）
+                                buffer_seconds = self.detect_interval / self.fps
+                                paused_start_frame = frame_idx - int(buffer_seconds * self.fps)
+                                paused_start_frame = max(0, paused_start_frame)  # 不能小于 0
+                                log_msg = f"Paused 开始 帧 {frame_idx} ({frame_idx/self.fps:.2f}s) 置信度：{det['confidence']:.2f}, 向前缓冲 {buffer_seconds:.1f}s 至帧 {paused_start_frame}"
+                                print(f"[DEBUG] {log_msg}")
+                                if self.log_callback:
+                                    self.log_callback(f"⏸️ {log_msg}")
 
-                # 检测 paused 结束
-                if not has_paused and paused_status == 'START':
-                    paused_status = None
-                    paused_end_buffer_frame = frame_idx + int(1.0 * self.fps)  # 结束后 1 秒缓冲
-                    duration = (frame_idx - paused_start_frame) / self.fps
-                    log_msg = f"Paused 结束 帧 {frame_idx} ({frame_idx/self.fps:.2f}s) 持续：{duration:.2f}s, 缓冲至帧 {paused_end_buffer_frame}"
-                    print(f"[DEBUG] {log_msg}")
-                    if self.log_callback:
-                        self.log_callback(f"⏸️ {log_msg}")
-                
-                # 如果是 replay 或 paused 状态，添加到切断点
-                if has_replay:
-                    cut_points.append(CutPoint(
-                        frame=frame_idx,
-                        cut_type='replay',
-                        confidence=detections[0]['confidence']
-                    ))
-                if has_paused:
-                    cut_points.append(CutPoint(
-                        frame=frame_idx,
-                        cut_type='paused',
-                        confidence=detections[0]['confidence']
-                    ))
+                    # 检测 replay 结束（只在检测帧执行）
+                    if not has_replay and replay_status == 'START':
+                        replay_status = None
+                        # 动态缓冲：向后缓冲 = 检测间隔对应的时间（可能漏掉的最大时间窗口）
+                        buffer_seconds = self.detect_interval / self.fps
+                        replay_end_buffer_frame = frame_idx + int(buffer_seconds * self.fps)
+                        duration = (frame_idx - replay_start_frame) / self.fps
+                        log_msg = f"Replay 结束 帧 {frame_idx} ({frame_idx/self.fps:.2f}s) 持续：{duration:.2f}s, 向后缓冲 {buffer_seconds:.1f}s 至帧 {replay_end_buffer_frame}"
+                        print(f"[DEBUG] {log_msg}")
+                        if self.log_callback:
+                            self.log_callback(f"🎬 {log_msg}")
 
-                # 检测 victory 事件
-                for det in detections:
-                    if det['class'] == 'victory':
-                        victory_events.append({
-                            'frame': frame_idx,
-                            'time': frame_idx / self.fps,
-                            'confidence': det['confidence']
-                        })
-                        # 同时将 victory 事件添加到 all_events，用于生成片段
-                        victory_config = self.HIGHLIGHT_CONFIG['victory']
-                        seg_start_frame = int(frame_idx - victory_config['pre_seconds'] * self.fps)
-                        seg_end_frame = int(frame_idx + victory_config['post_seconds'] * self.fps)
-                        all_events.append({
-                            'type': 'victory',
-                            'frame': frame_idx,
-                            'start_frame': frame_idx,
-                            'end_frame': frame_idx,
-                            'start_time': frame_idx / self.fps,
-                            'end_time': frame_idx / self.fps,
-                            'seg_start_frame': seg_start_frame if seg_start_frame >= 0 else 0,
-                            'seg_end_frame': seg_end_frame if seg_end_frame < total_frames else total_frames,
-                        })
-                        print(f"[DEBUG] 检测到胜利画面：帧 {frame_idx}, 置信度：{det['confidence']}")
+                    # 检测 paused 结束（只在检测帧执行）
+                    if not has_paused and paused_status == 'START':
+                        paused_status = None
+                        # 动态缓冲：向后缓冲 = 检测间隔对应的时间（可能漏掉的最大时间窗口）
+                        buffer_seconds = self.detect_interval / self.fps
+                        paused_end_buffer_frame = frame_idx + int(buffer_seconds * self.fps)
+                        duration = (frame_idx - paused_start_frame) / self.fps
+                        log_msg = f"Paused 结束 帧 {frame_idx} ({frame_idx/self.fps:.2f}s) 持续：{duration:.2f}s, 向后缓冲 {buffer_seconds:.1f}s 至帧 {paused_end_buffer_frame}"
+                        print(f"[DEBUG] {log_msg}")
+                        if self.log_callback:
+                            self.log_callback(f"⏸️ {log_msg}")
+
+                    # 如果是 replay 或 paused 状态，添加到切断点
+                    if has_replay:
+                        cut_points.append(CutPoint(
+                            frame=frame_idx,
+                            cut_type='replay',
+                            confidence=detections[0]['confidence']
+                        ))
+                    if has_paused:
+                        cut_points.append(CutPoint(
+                            frame=frame_idx,
+                            cut_type='paused',
+                            confidence=detections[0]['confidence']
+                        ))
+
+                    # 检测 victory 事件
+                    for det in detections:
+                        if det['class'] == 'victory':
+                            victory_events.append({
+                                'frame': frame_idx,
+                                'time': frame_idx / self.fps,
+                                'confidence': det['confidence']
+                            })
+                            # 同时将 victory 事件添加到 all_events，用于生成片段
+                            victory_config = self.HIGHLIGHT_CONFIG['victory']
+                            seg_start_frame = int(frame_idx - victory_config['pre_seconds'] * self.fps)
+                            seg_end_frame = int(frame_idx + victory_config['post_seconds'] * self.fps)
+                            all_events.append({
+                                'type': 'victory',
+                                'frame': frame_idx,
+                                'start_frame': frame_idx,
+                                'end_frame': frame_idx,
+                                'start_time': frame_idx / self.fps,
+                                'end_time': frame_idx / self.fps,
+                                'seg_start_frame': seg_start_frame if seg_start_frame >= 0 else 0,
+                                'seg_end_frame': seg_end_frame if seg_end_frame < total_frames else total_frames,
+                            })
+                            print(f"[DEBUG] 检测到胜利画面：帧 {frame_idx}, 置信度：{det['confidence']}")
             
             # 如果是 replay 或 paused 状态，跳过后续人头数检测逻辑
             # 检查是否在缓冲期内
@@ -400,9 +421,9 @@ class Dota2ClipDetector:
             else:
                 consecutive_no_score_count = 0
 
-            # OCR 人头数检测（每 detect_interval 帧检测一次，使用 YOLO 检测比分区域）
+            # OCR 人头数检测（只在检测帧执行，使用 YOLO 检测比分区域）
             # replay/paused 状态下跳过人头数检测
-            if self.use_ocr and self.ocr_detector and frame_idx % self.detect_interval == 0 and not is_replay_or_paused:
+            if self.use_ocr and self.ocr_detector and is_detect_frame and not is_replay_or_paused:
                 # 使用 YOLO 检测比分区域
                 score_area = None
                 for det in detections:
@@ -598,19 +619,27 @@ class Dota2ClipDetector:
         return invalid_ranges
 
     def _create_no_score_ranges(self, no_score_frames: List[int], total_frames: int) -> List[InvalidRange]:
-        """从无比分帧创建无效区间"""
-        print(f"[DEBUG] _create_no_score_ranges 输入：{len(no_score_frames)} 个无比分帧")
+        """
+        从无比分帧创建无效区间
         
+        逻辑：从无比分画面出现 → 有比分画面重新出现的整个区间都设为无效帧
+        前后按照 detect_interval 的频率进行缓冲
+        """
+        print(f"[DEBUG] _create_no_score_ranges 输入：{len(no_score_frames)} 个无比分帧")
+
         if not no_score_frames:
             return []
-        
-        # 将连续的帧合并为区间（允许最多 1 秒的间断）
+
+        # 计算缓冲帧数（基于检测间隔）
+        buffer_frames = self.detect_interval
+
+        # 将连续的无比分帧合并为区间（允许最多 1 秒的间断）
         gap_threshold = int(1.0 * self.fps)  # 1 秒的帧数
-        
-        ranges = []
+
+        raw_ranges = []
         current_start = no_score_frames[0]
         current_end = no_score_frames[0]
-        
+
         for frame in no_score_frames[1:]:
             if frame - current_end <= gap_threshold:
                 # 连续或间断很小，扩展当前区间
@@ -618,39 +647,35 @@ class Dota2ClipDetector:
             else:
                 # 间断太大，保存当前区间并开始新的区间
                 if current_end - current_start >= self.fps:  # 至少 1 秒才视为无效区间
-                    ranges.append({
+                    raw_ranges.append({
                         'start_frame': current_start,
                         'end_frame': current_end,
                         'type': 'no_score'
                     })
                 current_start = frame
                 current_end = frame
-        
+
         # 保存最后一个区间
         if current_end - current_start >= self.fps:  # 至少 1 秒
-            ranges.append({
+            raw_ranges.append({
                 'start_frame': current_start,
                 'end_frame': current_end,
                 'type': 'no_score'
             })
-        
-        print(f"[DEBUG] 合并后的无比分区间：{len(ranges)} 个")
-        for r in ranges:
-            print(f"   - no_score: {r['start_frame']/self.fps:.2f}s ~ {r['end_frame']/self.fps:.2f}s ({r['end_frame']-r['start_frame']+1}帧)")
-        
-        # 转换为 InvalidRange 对象，并扩展区间
+
+        print(f"[DEBUG] 合并后的原始无比分区间：{len(raw_ranges)} 个")
+        for r in raw_ranges:
+            print(f"   - 原始：{r['start_frame']/self.fps:.2f}s ~ {r['end_frame']/self.fps:.2f}s ({r['end_frame']-r['start_frame']+1}帧)")
+
+        # 扩展每个区间：向前和向后各扩展 buffer_frames 帧
+        # 这代表从无比分出现到比分重新出现的完整过渡区间
         invalid_ranges = []
-        for r in ranges:
-            config = self.INVALID_RANGE_CONFIG.get(r['type'], {'expand_pre_seconds': 0.0, 'expand_post_seconds': 0.0})
-            
-            # 计算扩展的帧数
-            expand_pre_frames = int(config['expand_pre_seconds'] * self.fps)
-            expand_post_frames = int(config['expand_post_seconds'] * self.fps)
-            
-            # 扩展区间
-            start_frame = max(0, r['start_frame'] - expand_pre_frames)
-            end_frame = min(total_frames - 1, r['end_frame'] + expand_post_frames)
-            
+        for r in raw_ranges:
+            # 向前扩展 buffer_frames 帧（无比分出现前的缓冲）
+            start_frame = max(0, r['start_frame'] - buffer_frames)
+            # 向后扩展 buffer_frames 帧（比分重新出现后的缓冲）
+            end_frame = min(total_frames - 1, r['end_frame'] + buffer_frames)
+
             invalid_ranges.append(InvalidRange(
                 start_frame=start_frame,
                 end_frame=end_frame,
@@ -659,7 +684,11 @@ class Dota2ClipDetector:
                 range_type=r['type'],
                 confidence=1.0  # 无比分区域的置信度设为 1.0
             ))
-        
+
+        print(f"[DEBUG] 扩展后的无比分无效区间（前后缓冲{buffer_frames}帧）: {len(invalid_ranges)} 个")
+        for ir in invalid_ranges:
+            print(f"   - no_score: {ir.start_time:.2f}s ~ {ir.end_time:.2f}s ({ir.end_frame-ir.start_frame+1}帧)")
+
         return invalid_ranges
 
     def _generate_segments_with_crop(
@@ -711,13 +740,28 @@ class Dota2ClipDetector:
         # 2. 对每个原始片段进行裁剪
         final_segments = []
         for raw_seg in raw_segments:
+            # 决胜时刻（victory）不裁剪无效区间
+            # 因为决胜时刻的结束画面可能是无比分画面
+            if raw_seg['type'] == 'victory':
+                description = self.HIGHLIGHT_CONFIG[raw_seg['type']]['description']
+                final_segments.append(ClipSegment(
+                    start_frame=int(raw_seg['start_frame']),
+                    end_frame=int(raw_seg['end_frame']),
+                    start_time=raw_seg['start_time'],
+                    end_time=raw_seg['end_time'],
+                    clip_type=raw_seg['type'],
+                    description=description,
+                    parent_event=raw_seg['type']
+                ))
+                continue
+
             # 找出与该片段重叠的无效区间
             overlapping_invalid = [
                 ir for ir in invalid_ranges
-                if ir.start_frame <= raw_seg['end_frame'] and 
+                if ir.start_frame <= raw_seg['end_frame'] and
                    ir.end_frame >= raw_seg['start_frame']
             ]
-            
+
             if not overlapping_invalid:
                 # 没有无效区间，直接添加
                 description = self.HIGHLIGHT_CONFIG[raw_seg['type']]['description']
@@ -727,7 +771,6 @@ class Dota2ClipDetector:
                     start_time=raw_seg['start_time'],
                     end_time=raw_seg['end_time'],
                     clip_type=raw_seg['type'],
-                    confidence=0.8,
                     description=description,
                     parent_event=raw_seg['type']
                 ))
@@ -786,14 +829,13 @@ class Dota2ClipDetector:
                         start_time=current_start / self.fps,
                         end_time=sub_end / self.fps,
                         clip_type=segment['type'],
-                        confidence=0.8,
                         description=f"{description} (片段{len(cropped_segments)+1})",
                         parent_event=segment['type']
                     ))
-            
+
             # 更新当前起始位置到无效区间之后
             current_start = invalid_end + 1
-        
+
         # 处理最后一个有效区间（最后一个无效区间之后）
         if current_start <= end:
             duration = (end - current_start) / self.fps
@@ -805,7 +847,6 @@ class Dota2ClipDetector:
                     start_time=current_start / self.fps,
                     end_time=end / self.fps,
                     clip_type=segment['type'],
-                    confidence=0.8,
                     description=f"{description} (片段{len(cropped_segments)+1})",
                     parent_event=segment['type']
                 ))
