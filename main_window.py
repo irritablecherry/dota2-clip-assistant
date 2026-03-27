@@ -407,7 +407,7 @@ class Dota2ClipAssistant(QMainWindow):
 
     def init_ui(self):
         """初始化 UI"""
-        self.setWindowTitle("🎮 Dota2 切片助手 - 高光片段提取 v2.0")
+        self.setWindowTitle("🎮 Dota2 切片助手 - 高光片段提取 v3.0")
         self.setMinimumSize(1000, 750)
 
         central_widget = QWidget()
