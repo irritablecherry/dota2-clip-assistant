@@ -574,9 +574,9 @@ class Dota2ClipAssistant(QMainWindow):
                 self.log_panel.append_log("🚀 视频提取可使用 FFmpeg 加速（速度提升 10-50 倍）")
                 if hasattr(self, 'ffmpeg_check'):
                     self.ffmpeg_check.setEnabled(True)
-                    # 从配置加载用户偏好
+                    # 从配置加载用户偏好，如果 FFmpeg 可用则默认为 True
                     config = load_config()
-                    use_ffmpeg = config.get("use_ffmpeg", False)
+                    use_ffmpeg = config.get("use_ffmpeg", True)  # 默认为 True
                     self.ffmpeg_check.setChecked(use_ffmpeg)
             else:
                 self.log_panel.append_log("ℹ️ 未检测到 FFmpeg，使用 Python 库处理视频")
