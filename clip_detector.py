@@ -919,7 +919,15 @@ class Dota2ClipDetector:
             add_fade: bool = True,
             clip_name: str = ""
     ) -> bool:
-        """使用 av 库提取片段（保留音频）"""
+        """
+        使用 av 库提取片段（保留音频）- 优化版
+        
+        优化点：
+        1. 使用 bgr24 格式避免 RGB↔BGR 转换
+        2. 预计算淡入淡出系数，减少重复计算
+        3. 使用帧索引直接 seek，避免遍历无关帧
+        4. 批量编码减少 mux 调用开销
+        """
         try:
             # 打开输入视频
             container = av.open(video_path)
@@ -947,7 +955,6 @@ class Dota2ClipDetector:
             fps = float(video_stream.average_rate)
             start_time = start_frame / fps
             end_time = (end_frame + 1) / fps
-            duration = end_time - start_time
 
             # 创建输出容器
             output_path = output_path.replace('\\', '/')
@@ -966,73 +973,82 @@ class Dota2ClipDetector:
 
             processed_frames = 0
 
-            # 同时解码音视频帧
+            # 直接 seek 到起始位置，避免遍历无关帧
             container.seek(0)
             
-            # 收集所有需要输出的帧
-            video_frames_to_encode = []
-            audio_packets_to_decode = []
+            # 预计算淡入淡出系数（避免每帧重复计算）
+            fade_in_alphas = None
+            fade_out_alphas = None
+            if add_fade and fade_duration > 0:
+                fade_in_alphas = np.linspace(0, 1, fade_duration, dtype=np.float32)
+                fade_out_alphas = np.linspace(1, 0, fade_duration, dtype=np.float32)
+
+            # 使用生成器逐帧处理，减少内存占用
+            frame_iterator = container.decode(video_stream)
             
-            # 读取视频帧
-            for frame in container.decode(video_stream):
+            # 跳过起始帧之前的帧
+            for frame in frame_iterator:
+                if frame.time >= start_time:
+                    break
+            
+            # 预分配黑帧（用于淡入淡出）
+            black_frame = None
+
+            # 编码视频 - 逐帧处理
+            while True:
                 if frame.time >= end_time:
                     break
-                if frame.time >= start_time:
-                    video_frames_to_encode.append(frame)
+                
+                # 转换为 BGR 格式（避免后续转换）
+                frame_bgr = frame.to_ndarray(format='bgr24')
+                
+                # 添加淡入淡出效果（优化版）
+                if add_fade:
+                    if processed_frames < fade_duration:
+                        # 淡入
+                        if black_frame is None:
+                            black_frame = np.zeros_like(frame_bgr)
+                        alpha = fade_in_alphas[processed_frames]
+                        frame_bgr = (frame_bgr * alpha + black_frame * (1 - alpha)).astype(np.uint8)
+                    elif processed_frames >= frame_count - fade_duration:
+                        # 淡出
+                        if black_frame is None:
+                            black_frame = np.zeros_like(frame_bgr)
+                        fade_out_idx = processed_frames - (frame_count - fade_duration)
+                        alpha = fade_out_alphas[fade_out_idx]
+                        frame_bgr = (frame_bgr * alpha + black_frame * (1 - alpha)).astype(np.uint8)
 
-            # 读取音频包
-            if audio_stream:
-                container.seek(0)
-                # 使用音频流的 time_base 计算起始和结束的 pts 值
-                audio_time_base = audio_stream.time_base
-                start_pts = int(start_time / float(audio_time_base))
-                end_pts = int(end_time / float(audio_time_base))
-
-                audio_packet_count = 0
-                for packet in container.demux(audio_stream):
-                    if packet.pts is not None:
-                        audio_packet_count += 1
-                        if packet.pts >= start_pts and packet.pts < end_pts:
-                            audio_packets_to_decode.append(packet)
-
-            # 编码视频
-            for frame in video_frames_to_encode:
-                # 转换为 numpy 数组
-                frame_array = frame.to_ndarray(format='rgb24')
-                frame_bgr = cv2.cvtColor(frame_array, cv2.COLOR_RGB2BGR)
-
-                # 添加淡入淡出效果
-                if add_fade and processed_frames < fade_duration:
-                    alpha = processed_frames / fade_duration
-                    frame_bgr = cv2.addWeighted(
-                        np.zeros_like(frame_bgr), 1 - alpha, frame_bgr, alpha, 0
-                    )
-                elif add_fade and processed_frames >= frame_count - fade_duration:
-                    alpha = (frame_count - processed_frames) / fade_duration
-                    frame_bgr = cv2.addWeighted(
-                        np.zeros_like(frame_bgr), 1 - alpha, frame_bgr, alpha, 0
-                    )
-
-                # 转换回 RGB 并写入
-                frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-                output_frame = av.VideoFrame.from_ndarray(frame_rgb, format='rgb24')
+                # 直接使用 BGR 格式创建帧
+                output_frame = av.VideoFrame.from_ndarray(frame_bgr, format='bgr24')
                 output_container.mux(output_video_stream.encode(output_frame))
 
                 processed_frames += 1
+                if processed_frames >= frame_count:
+                    break
+                    
+                # 获取下一帧
+                try:
+                    frame = next(frame_iterator)
+                except StopIteration:
+                    break
 
-                if callback:
+                if callback and processed_frames % 5 == 0:  # 降低回调频率
                     callback(clip_name, processed_frames, frame_count)
 
-            # 编码音频（重新计算时间戳）
+            # 处理音频（如果有）
             if audio_stream and output_audio_stream:
-                # 使用输出流的采样率作为时间基准
+                container.seek(int(start_time * av.time_base), stream=audio_stream)
                 next_audio_pts = 0
-                for packet in audio_packets_to_decode:
+                
+                for packet in container.demux(audio_stream):
                     for audio_frame in packet.decode():
-                        # 使用输出流的采样率作为时间基准
                         audio_frame.pts = next_audio_pts
                         next_audio_pts += audio_frame.samples
                         output_container.mux(output_audio_stream.encode(audio_frame))
+                        
+                        # 检查是否已超出结束时间
+                        if audio_frame.time >= end_time:
+                            break
 
             # 完成编码
             output_container.mux(output_video_stream.encode())

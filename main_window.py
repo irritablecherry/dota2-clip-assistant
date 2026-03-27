@@ -742,11 +742,10 @@ class Dota2ClipAssistant(QMainWindow):
         self.statusBar().showMessage(f"已从缓存加载 - 发现 {len(self.segments)} 个高光片段")
         self.log_panel.append_log(f"✅ 已从缓存加载 {len(self.segments)} 个高光片段")
         self.log_panel.append_log(f"   📅 原始分析时间：{cache_data.analyze_time}")
-        
+
         for seg in self.segments:
             self.log_panel.append_log(
-                f"   🎬 {seg.description}: {seg.start_time:.2f}s ~ {seg.end_time:.2f}s "
-                f"(置信度：{seg.confidence:.2f})"
+                f"   🎬 {seg.description}: {seg.start_time:.2f}s ~ {seg.end_time:.2f}s"
             )
 
     def on_analysis_progress(self, current: int, total: int):
@@ -836,8 +835,7 @@ class Dota2ClipAssistant(QMainWindow):
             for seg in segments:
                 try:
                     self.log_panel.append_log(
-                        f"   🎬 {seg.description}: {seg.start_time:.2f}s ~ {seg.end_time:.2f}s "
-                        f"(置信度：{seg.confidence:.2f})"
+                        f"   🎬 {seg.description}: {seg.start_time:.2f}s ~ {seg.end_time:.2f}s"
                     )
                 except Exception as e:
                     print(f"[ERROR] 添加日志失败：{e}")
