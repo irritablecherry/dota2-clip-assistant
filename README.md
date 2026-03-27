@@ -55,14 +55,32 @@
    pip install -r requirements.txt
    ```
 
-4. **准备模型**
-   
-   将训练好的 YOLOv8 模型文件 `best.pt` 放置在 `model/` 目录下
+4. **下载模型和测试视频**
+
+   **百度网盘下载：**
+   - 链接：https://pan.baidu.com/s/18yEmXvE86tdvaNustJ4Orw
+   - 提取码：关注下方公众号，回复`dota2切片助手`即可获得提取码
+   - 包含内容：
+     - `model/best.pt` - YOLOv8 检测模型（必需）
+     - `videos/` - 测试视频文件（可选）
+
+   将下载的 `best.pt` 模型文件放置在 `model/` 目录下
 
 5. **运行程序**
    ```bash
    python main.py
    ```
+
+---
+
+## 📦 资源下载
+
+| 资源 | 下载方式 | 说明 |
+|------|---------|------|
+| YOLOv8 模型 | 百度网盘 | 必需，约 50MB |
+| 测试视频 | 百度网盘 | 可选，用于测试功能 |
+| FFmpeg | [官网下载](https://ffmpeg.org/download.html) | 可选，加速视频处理 |
+
 
 ---
 
@@ -248,6 +266,17 @@ dota2-clip-assistant/
 
 - 提交 Issue
 - 发送邮件至项目维护者
+- 作者：Cherry
+- 邮箱：irritablecherry@qq.com
+- 项目地址：https://github.com/irritablecherry/dota2-clip-assistant
+---
+
+## 📱 关注我
+- 如需获得商业授权请关注公众号联系作者
+
+|                                        公众号                                         | 
+|:----------------------------------------------------------------------------------:|
+|<img src="qrcode.png" width="400" >|
 
 ---
 
