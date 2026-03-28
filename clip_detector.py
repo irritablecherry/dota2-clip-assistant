@@ -292,8 +292,18 @@ class Dota2ClipDetector:
         # 初始化上一次检测结果（用于间隔检测时的复用）
         last_detections = []
 
+        # 计算最后 5 秒的起始帧（用于更密集的检测）
+        # 只有当检测间隔 > 5 帧时才需要特殊处理，否则使用原始间隔即可
+        last_5_seconds_start = None
+        if self.detect_interval > 5:
+            last_5_seconds_start = max(0, total_frames - int(5.0 * self.fps))
+
         start_time = time.time()
-        print(f"[DEBUG] 开始分析视频，总帧数：{total_frames}, FPS: {self.fps}, 检测间隔：{self.detect_interval}帧")
+        if last_5_seconds_start is not None:
+            print(f"[DEBUG] 开始分析视频，总帧数：{total_frames}, FPS: {self.fps}, 检测间隔：{self.detect_interval}帧")
+            print(f"[DEBUG] 最后 5 秒起始帧：{last_5_seconds_start} ({last_5_seconds_start/self.fps:.2f}s)，该区域使用每 5 帧检测 1 次")
+        else:
+            print(f"[DEBUG] 开始分析视频，总帧数：{total_frames}, FPS: {self.fps}, 检测间隔：{self.detect_interval}帧")
 
         while True:
             ret, frame = cap.read()
@@ -301,7 +311,11 @@ class Dota2ClipDetector:
                 break
 
             # YOLO 间隔检测
-            is_detect_frame = (frame_idx % self.detect_interval == 0)
+            # 如果检测间隔 > 5 帧，视频最后 5 秒使用每 5 帧检测 1 次，避免漏检决胜时刻
+            if last_5_seconds_start is not None and frame_idx >= last_5_seconds_start:
+                is_detect_frame = (frame_idx % 5 == 0)
+            else:
+                is_detect_frame = (frame_idx % self.detect_interval == 0)
             
             if is_detect_frame:
                 # 执行 YOLO 检测
