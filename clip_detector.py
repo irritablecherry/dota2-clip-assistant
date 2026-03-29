@@ -541,6 +541,8 @@ class Dota2ClipDetector:
                                 })
                                 print(
                                     f"[DEBUG] 人头变化：{latest_event.team} {latest_event.old_score}→{latest_event.new_score}")
+                                print(
+                                    f"[DEBUG] 人头变化：{score_info}")
 
                         # 实时输出人头数（当人头数变化时，且距离上次回调至少 30 帧）
                         current_score = (score_info.radiant_kills, score_info.dire_kills)

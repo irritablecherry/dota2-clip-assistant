@@ -7,6 +7,7 @@ import numpy as np
 from typing import Optional, Tuple, List
 from dataclasses import dataclass
 from pathlib import Path
+from collections import Counter
 
 # 检测间隔帧数
 DETECT_INTERVAL_FRAMES = 30
@@ -94,12 +95,23 @@ class ScoreOCRDetector:
         # 人头数缓存（初始为 0:0）
         self.last_radiant = 0
         self.last_dire = 0
-        
+
         # 时间缓存和校验
         self.last_time_str = "0:00"
         self.last_time_conf = 0.0
         self.time_history: List[Tuple[int, str, float]] = []  # (frame_idx, time_str, conf)
         self.time_trend = None  # None, "increasing", "decreasing"
+
+        # 初始化标志（用于处理视频不是从 0:0 开始的情况）
+        self.initialized = False  # 是否已完成初始值校准
+        self.init_skip_frames = 3  # 前 3 次检测用于校准，不触发人头事件
+
+        # 验证模式状态跟踪（用于过滤误识别）
+        self.verifying = False  # 是否处于验证模式
+        self.verify_target = None  # 间隔帧识别到的人头数 (radiant, dire)
+        self.verify_frames = []  # 验证帧的识别结果 [(radiant, dire, frame_idx), ...]
+        self.verify_max_frames = 3  # 最多验证 3 帧
+        self.verify_kill_detected = False  # 间隔帧是否检测到人头变化
 
     def set_score_area(self, frame: np.ndarray, roi: Optional[Tuple[int, int, int, int]] = None):
         """
@@ -372,38 +384,109 @@ class ScoreOCRDetector:
         # 识别人头数和时间
         radiant, dire, time_str, time_conf = self._easyocr_recognize(score_area)
 
-        # 人头数校验逻辑 1：人头数只能增加，不能减少
-        # 如果识别到的值比上次小，说明是误识别，使用上次结果
-        if radiant is not None and self.last_radiant is not None:
-            if radiant < self.last_radiant:
-                print(f"[DEBUG] 人头数校正：天灾 {self.last_radiant}→{radiant} (减少)，使用上次值 {self.last_radiant}")
+        # 初始值校准逻辑：处理视频不是从 0:0 开始的情况
+        if not self.initialized:
+            if radiant is not None and dire is not None:
+                # 检查比赛时间，如果时间 > 30 秒，说明视频从比赛中段开始
+                time_sec = self._parse_time_to_seconds(time_str) if time_str else 0
+                if time_sec is None:
+                    time_sec = 0
+                
+                # 如果时间 > 30 秒 或 人头数 > 0，视为非 0:0 开局
+                if time_sec > 30 or radiant > 0 or dire > 0:
+                    print(f"[DEBUG] 初始值校准：视频从比赛中段开始，设置初始人头数 {radiant}:{dire} (比赛时间：{time_str})")
+                    self.last_radiant = radiant
+                    self.last_dire = dire
+                    self.initialized = True
+                    # 直接返回，不触发人头事件
+                    # 继续后续逻辑，但不会检测人头变化
+                else:
+                    # 时间接近 0:00，可能是游戏刚开始，需要继续观察
+                    # 前 init_skip_frames 次检测用于校准，不触发人头事件
+                    if hasattr(self, '_init_count'):
+                        self._init_count += 1
+                    else:
+                        self._init_count = 1
+                    
+                    if self._init_count >= self.init_skip_frames:
+                        # 校准完成，采用当前识别值作为初始值
+                        print(f"[DEBUG] 初始值校准：完成 {self.init_skip_frames} 次检测，设置初始人头数 {radiant}:{dire}")
+                        self.last_radiant = radiant
+                        self.last_dire = dire
+                        self.initialized = True
+                    # 继续后续逻辑，但不会检测人头变化
+
+        # 验证模式处理
+        if self.verifying:
+            # 收集验证帧结果
+            if radiant is not None and dire is not None:
+                self.verify_frames.append((radiant, dire, frame_idx))
+            
+            # 检查是否收集到足够的验证帧
+            if len(self.verify_frames) >= self.verify_max_frames:
+                # 验证完成，进行判定（会更新 self.last_radiant/self.last_dire）
+                self._finalize_verification()
+                # 验证完成后，使用验证后的值
                 radiant = self.last_radiant
-        if dire is not None and self.last_dire is not None:
-            if dire < self.last_dire:
-                print(f"[DEBUG] 人头数校正：夜魇 {self.last_dire}→{dire} (减少)，使用上次值 {self.last_dire}")
+                dire = self.last_dire
+            else:
+                # 验证进行中，使用上次缓存的值（保持不变）
+                radiant = self.last_radiant
+                dire = self.last_dire
+        else:
+            # 正常模式：进行人头数校验
+            
+            # 人头数校验逻辑 1：人头数只能增加，不能减少
+            # 如果识别到的值比上次小，说明是误识别，使用上次结果
+            if radiant is not None and self.last_radiant is not None:
+                if radiant < self.last_radiant:
+                    print(f"[DEBUG] 人头数校正：天灾 {self.last_radiant}→{radiant} (减少)，使用上次值 {self.last_radiant}")
+                    radiant = self.last_radiant
+            if dire is not None and self.last_dire is not None:
+                if dire < self.last_dire:
+                    print(f"[DEBUG] 人头数校正：夜魇 {self.last_dire}→{dire} (减少)，使用上次值 {self.last_dire}")
+                    dire = self.last_dire
+
+            # 人头数校验逻辑 2：单次变化不能超过阈值（最多 5 个人头）
+            # 如果变化太大，说明是误识别，使用上次结果
+            MAX_KILL_CHANGE = 5  # 单次最多变化 5 个人头
+            if radiant is not None and self.last_radiant is not None:
+                if radiant - self.last_radiant > MAX_KILL_CHANGE:
+                    print(f"[DEBUG] 人头数校正：天灾 {self.last_radiant}→{radiant} (+{radiant-self.last_radiant} 变化过大)，使用上次值 {self.last_radiant}")
+                    radiant = self.last_radiant
+            if dire is not None and self.last_dire is not None:
+                if dire - self.last_dire > MAX_KILL_CHANGE:
+                    print(f"[DEBUG] 人头数校正：夜魇 {self.last_dire}→{dire} (+{dire-self.last_dire} 变化过大)，使用上次值 {self.last_dire}")
+                    dire = self.last_dire
+
+            # 如果没有识别到人头数，使用上次结果
+            if radiant is None:
+                radiant = self.last_radiant
+            if dire is None:
                 dire = self.last_dire
 
-        # 人头数校验逻辑 2：单次变化不能超过阈值（最多 2 个人头）
-        # 如果变化太大，说明是误识别，使用上次结果
-        # MAX_KILL_CHANGE = 2  # 单次最多变化 2 个人头
-        # if radiant is not None and self.last_radiant is not None:
-        #     if radiant - self.last_radiant > MAX_KILL_CHANGE:
-        #         print(f"[DEBUG] 人头数校正：天灾 {self.last_radiant}→{radiant} (+{radiant-self.last_radiant} 变化过大)，使用上次值 {self.last_radiant}")
-        #         radiant = self.last_radiant
-        # if dire is not None and self.last_dire is not None:
-        #     if dire - self.last_dire > MAX_KILL_CHANGE:
-        #         print(f"[DEBUG] 人头数校正：夜魇 {self.last_dire}→{dire} (+{dire-self.last_dire} 变化过大)，使用上次值 {self.last_dire}")
-        #         dire = self.last_dire
+            # 检测是否有人头数变化（用于触发验证）
+            # 注意：未初始化时不触发人头事件
+            has_kill_change = False
+            if self.initialized:
+                has_kill_change = (radiant > self.last_radiant) or (dire > self.last_dire)
 
-        # 如果没有识别到人头数，使用上次结果
-        if radiant is None:
-            radiant = self.last_radiant
-        if dire is None:
-            dire = self.last_dire
-
-        # 更新人头数缓存
-        self.last_radiant = radiant
-        self.last_dire = dire
+            # 如果检测到人头变化，触发验证模式
+            if has_kill_change:
+                # 触发验证，但不立即更新缓存
+                self.verifying = True
+                self.verify_target = (radiant, dire)
+                self.verify_frames = []
+                self.verify_kill_detected = True
+                print(f"[DEBUG] 检测到人头变化：{radiant}:{dire}，启动验证模式")
+                # 验证期间保持原值不变，等待验证完成后再更新
+                # 当前帧的 radiant/dire 也使用原值，等待验证完成后再更新
+                radiant = self.last_radiant
+                dire = self.last_dire
+            else:
+                # 没有人头变化，正常更新缓存
+                self.last_radiant = radiant
+                self.last_dire = dire
 
         # 时间处理逻辑
         time_display = "??:??"
@@ -464,6 +547,66 @@ class ScoreOCRDetector:
         self._detect_kill_event(score_info)
 
         return score_info
+
+    def _finalize_verification(self):
+        """
+        验证完成后的判定逻辑
+        
+        验证逻辑：
+        1. 统计验证帧中出现次数最多的值（多数投票）
+        2. 与间隔帧的原始值比较：
+           - 一致 → 确认变化有效
+           - 验证值 > 间隔帧值 → 人头继续增加，采用验证值
+           - 验证值 < 间隔帧值 → 间隔帧是误识别，采用验证值并回溯修正
+        """
+        if not self.verify_frames:
+            # 没有有效验证帧，保持原值
+            self.verifying = False
+            self.verify_target = None
+            self.verify_frames = []
+            print(f"[DEBUG] 验证完成：无有效验证帧，保持原值 {self.last_radiant}:{self.last_dire}")
+            return
+        
+        # 多数投票：统计验证帧中出现次数最多的值
+        radiant_counts = Counter([f[0] for f in self.verify_frames])
+        dire_counts = Counter([f[1] for f in self.verify_frames])
+        
+        validated_radiant = radiant_counts.most_common(1)[0][0]
+        validated_dire = dire_counts.most_common(1)[0][0]
+        
+        target_radiant, target_dire = self.verify_target
+        
+        # 判定逻辑
+        if validated_radiant == target_radiant and validated_dire == target_dire:
+            # 验证一致，确认变化有效
+            print(f"[DEBUG] 验证完成：验证一致 {validated_radiant}:{validated_dire}，确认变化有效")
+            # 更新缓存为验证后的值
+            self.last_radiant = validated_radiant
+            self.last_dire = validated_dire
+        elif validated_radiant > target_radiant or validated_dire > target_dire:
+            # 验证值更大，说明人头继续增加，采用验证值
+            print(f"[DEBUG] 验证完成：验证值更大 {target_radiant}:{target_dire}→{validated_radiant}:{validated_dire}，采用验证值")
+            self.last_radiant = validated_radiant
+            self.last_dire = validated_dire
+        elif validated_radiant < target_radiant or validated_dire < target_dire:
+            # 验证值更小，说明间隔帧是误识别，采用验证值并回溯修正
+            print(f"[DEBUG] 验证完成：间隔帧误识别 {target_radiant}:{target_dire}→{validated_radiant}:{validated_dire}，修正历史")
+            self.last_radiant = validated_radiant
+            self.last_dire = validated_dire
+
+            # 回溯修正 score_history 中的错误值
+            if self.score_history:
+                for score in self.score_history:
+                    if score.radiant_kills == target_radiant and score.dire_kills == target_dire:
+                        score.radiant_kills = validated_radiant
+                        score.dire_kills = validated_dire
+                        score.new_score = (validated_radiant, validated_dire)
+        
+        # 退出验证模式
+        self.verifying = False
+        self.verify_target = None
+        self.verify_frames = []
+        self.verify_kill_detected = False
 
     def _detect_kill_event(self, current_score: ScoreInfo):
         """检测人头数变化事件"""
@@ -534,6 +677,15 @@ class ScoreOCRDetector:
         self.last_time_conf = 0.0
         self.time_history.clear()
         self.time_trend = None
+        # 重置验证状态
+        self.verifying = False
+        self.verify_target = None
+        self.verify_frames = []
+        self.verify_kill_detected = False
+        # 重置初始化状态
+        self.initialized = False
+        self.init_skip_frames = 3
+        self._init_count = 0
 
 
 class KillHighlightDetector:
